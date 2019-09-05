@@ -1,111 +1,56 @@
-import com.google.api.gax.grpc.ApiException
-import com.google.api.resourcenames.ResourceName
-import com.google.cloud.pubsub.spi.v1.SubscriptionAdminClient
-import com.google.pubsub.v1.SubscriptionName
-//import com.google.api.gax.rpc.ApiException
-//import com.google.cloud.pubsub.v1.SubscriptionAdminClient
-//import com.google.pubsub.v1.{ProjectSubscriptionName, ProjectTopicName, PushConfig, Subscription}
+import java.security.Security
+import java.time.LocalDateTime
+import java.util.Collections
+
+import akka.actor.ActorSystem
+import akka.grpc.GrpcClientSettings
+import akka.stream.ActorMaterializer
+import com.google.auth.oauth2.GoogleCredentials
+import com.typesafe.config.ConfigFactory
+import io.grpc.auth.MoreCallCredentials
+import java.util.Collections
+import java.util.concurrent.TimeUnit
+
+import akka.grpc.GrpcClientSettings
+import akka.stream.ActorMaterializer
+import com.google.protobuf.ByteString
+import com.google.pubsub.v1
+import com.google.pubsub.v1._
+
+import scala.collection.JavaConverters._
+import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.language.reflectiveCalls
+import scala.concurrent.duration._
+import akka.actor.ActorSystem
+import org.conscrypt.Conscrypt
 
 object Main extends App {
 
-//  private def integratedTestAlpakka = {
-//    val config = ConfigFactory.parseString("alpakka.google.cloud.pubsub.grpc.rootCa = \"ca-certificates.crt\"")
-//    implicit val system = ActorSystem("test", config)
-//
-//    try {
-//      Try {
-//        val conscryptProviderPosition = 1
-//        Security.insertProviderAt(Conscrypt.newProvider, conscryptProviderPosition)
-//      }
-//
-//      implicit val materializer = ActorMaterializer()
-//      val topicName = "integrated-test"
-//      val projSubName = ProjectSubscriptionName.of("disco-sdp-dev", s"$topicName-subscription").toString
-//
-//      println("Running PubSub Sample ... ")
-//
-//      var success = false
-//      var retryCount = 0
-//      var sourceSubscription: Option[Subscription] = Option.empty
-//
-//      while (!success && retryCount < 10) {
-//        try {
-//          sourceSubscription = Some(Await.result(GrpcSubscriberExt().subscriber.client
-//            .getSubscription(GetSubscriptionRequest(projSubName))
-//            , 30 seconds))
-//          success = true
-//        } catch {
-//          case t: Throwable => t.printStackTrace()
-//            val sleepTime = Random.nextInt(3000)
-//            println(s"Sleeping ${sleepTime / 1000} secs")
-//            Thread.sleep(sleepTime)
-//            retryCount += 1
-//        }
-//      }
-//
-//      require(sourceSubscription.isDefined, s"Unable to subscribe to topic ${projSubName}")
-//
-//      println(s"Subscribed to topic ${projSubName}")
-//
-//      val streamingPullRequest = StreamingPullRequest()
-//        .withSubscription(projSubName)
-//        .withStreamAckDeadlineSeconds(30000)
-//
-//      def publishAllMessages(subscription: Subscription, messages: List[ByteString]): Future[immutable.Seq[PublishResponse]] = {
-//        val publishMessages = messages.map(msg => PubsubMessage().withData(msg))
-//
-//        Source(publishMessages).map { msg =>
-//          PublishRequest()
-//            .withTopic(subscription.topic)
-//            .addMessages(msg)
-//        }.via(GooglePubSub.publish(parallelism = 1))
-//          .runWith(Sink.seq)
-//      }
-//
-//      val publishResult = Await.result(publishAllMessages(sourceSubscription.get, List(ByteString.copyFrom("message", StandardCharsets.UTF_8))), 30 seconds)
-//      println(s"Publish finished: ${publishResult}")
-//
-//      val subscriber = GooglePubSub
-//        .subscribe(streamingPullRequest, 30 seconds)
-//
-//      val result = Await.result(subscriber
-//        .take(1)
-//        .takeWithin(30 seconds)
-//        .runWith(Sink.seq[ReceivedMessage]), 30 seconds)
-//
-//      println(s"Done: ${result} ")
-//    } finally {
-//      system.terminate()
-//    }
-//  }
+  val conscryptProviderPosition = 1
+  Security.insertProviderAt(Conscrypt.newProvider, conscryptProviderPosition)
 
-    println("Running PubSub Sample ... ")
+  implicit val ec: ExecutionContext = scala.concurrent.ExecutionContext.global
+  implicit val system = ActorSystem()
+  implicit val materializer = ActorMaterializer()
 
-  //  val projectId = "disco-sdp-dev"
-    val projectId = "disco-sdp-dev"
+  lazy val gcpPubSub = new CloudPubSub("disco-sdp-dev")
 
-    // Your topic ID, eg. "my-topic"
-    val topicId = "integrated-test"
+  val fieldToBeMasked = "col1"
+  val valueToBeMasked = "val1"
+  val currTime = LocalDateTime.now().toString
 
-    // Your subscription ID eg. "my-sub"
-    val subscriptionId = s"$topicId-subscription"
+  val sourceJson = List(s"""{"$fieldToBeMasked": "$valueToBeMasked", "col2": "$currTime"}""")
 
-//    val topicName = ProjectTopicName.of(projectId, topicId)
+  val receivedDataFuture =
+    gcpPubSub.pull("integrated-test-subscription", "disco-sdp-dev", sourceJson.size + 1)
 
-    // Create a new subscription
-//    val subscriptionName: ResourceName = ProjectSubscriptionName.of(projectId, subscriptionId)
-      val subscriptionName: SubscriptionName = SubscriptionName.create(projectId, subscriptionId)
+  val published = Await.result(gcpPubSub.publish("projects/disco-sdp-dev/topics/integrated-test", sourceJson.head.getBytes), 5 seconds)
+  println(s"Message published? $published")
 
-  try {
-      val subscriptionAdminClient = SubscriptionAdminClient.create
-      try { // create a pull subscription with default acknowledgement deadline (= 10 seconds)
-        val subscription = subscriptionAdminClient.getSubscription(subscriptionName)
-        println(s"Subscription ${subscriptionName.getProject}:${subscriptionName.getSubscription} retrieved: ${subscription}")
-      } catch {
-        case e: ApiException =>
-          e.printStackTrace()
-          // example : code = ALREADY_EXISTS(409) implies subscription already exists
-          println(s"Status Code: ${e.getStatusCode}")
-      } finally if (subscriptionAdminClient != null) subscriptionAdminClient.close()
-    }
+  val genericRecord = Await.result(receivedDataFuture, 60 seconds)
+  println(s"Records received: $genericRecord")
+
+  system.terminate()
+  System.exit(0)
 }
